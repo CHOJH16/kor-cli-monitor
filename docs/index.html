@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>한국 경기선행지수 (OECD CLI)</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root{--up:#e5484d;--down:#3b82f6;--bg:#0f1115;--card:#181b22;--tx:#e8eaed;--mut:#8b929e;}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--tx);
+       font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Malgun Gothic",sans-serif;
+       padding:18px;max-width:1000px;margin:0 auto}
+  h1{font-size:19px;margin:0 0 4px}
+  .sub{color:var(--mut);font-size:12px;margin-bottom:18px}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:18px}
+  .card{background:var(--card);border-radius:10px;padding:14px}
+  .lab{font-size:11px;color:var(--mut);margin-bottom:6px}
+  .val{font-size:23px;font-weight:700}
+  .up{color:var(--up)} .down{color:var(--down)}
+  .chart{background:var(--card);border-radius:10px;padding:14px;margin-bottom:12px}
+  .btns{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
+  button{background:var(--card);color:var(--mut);border:1px solid #2a2f3a;
+         border-radius:7px;padding:6px 14px;font-size:12px;cursor:pointer}
+  button.on{background:#2563eb;color:#fff;border-color:#2563eb}
+  table{width:100%;border-collapse:collapse;font-size:13px;background:var(--card);border-radius:10px;overflow:hidden}
+  th,td{padding:9px 12px;text-align:right;border-bottom:1px solid #23262e}
+  th{color:var(--mut);font-weight:500;font-size:11px}
+  th:first-child,td:first-child{text-align:left}
+  .foot{color:var(--mut);font-size:11px;margin:18px 0 40px;line-height:1.7}
+</style>
+</head>
+<body>
+<h1>🇰🇷 한국 경기선행지수 (OECD CLI, 진폭조정)</h1>
+<div class="sub" id="updated">불러오는 중…</div>
+
+<div class="cards">
+  <div class="card"><div class="lab">최신 기준월</div><div class="val" id="c-period">-</div></div>
+  <div class="card"><div class="lab">지수</div><div class="val" id="c-value">-</div></div>
+  <div class="card"><div class="lab">전월비</div><div class="val" id="c-chg">-</div></div>
+  <div class="card"><div class="lab">국면 판정</div><div class="val" id="c-state" style="font-size:19px">-</div></div>
+</div>
+
+<div class="btns">
+  <button data-n="36">3년</button>
+  <button data-n="60" class="on">5년</button>
+  <button data-n="120">10년</button>
+  <button data-n="0">전체</button>
+</div>
+
+<div class="chart"><canvas id="line" height="110"></canvas></div>
+<div class="chart"><canvas id="bar" height="70"></canvas></div>
+
+<table>
+  <thead><tr><th>기준월</th><th>지수</th><th>전월비</th><th>방향</th></tr></thead>
+  <tbody id="tbody"></tbody>
+</table>
+
+<div class="foot">
+  빨강 = 상승 구간, 파랑 = 하락 구간. 점선은 장기추세 기준선 100입니다.<br>
+  출처: OECD Composite Leading Indicators (SDMX API). 과거 수치는 매월 소급 개정될 수 있습니다.<br>
+  본 페이지는 개인 참고용이며 투자 권유가 아닙니다.
+</div>
+
+<script>
+const UP="#e5484d", DOWN="#3b82f6";
+let raw=null, line=null, bar=null;
+
+Chart.defaults.color="#8b929e";
+Chart.defaults.font.size=11;
+
+fetch("./data/kor_cli.json?v="+Date.now())
+  .then(r=>r.json()).then(d=>{ raw=d; init(); })
+  .catch(()=>document.getElementById("updated").textContent="데이터를 아직 불러올 수 없습니다. 첫 실행이 끝났는지 확인하세요.");
+
+function init(){
+  const L=raw.latest;
+  const cls = L.change>0 ? "up" : (L.change<0 ? "down" : "");
+  document.getElementById("updated").textContent =
+    "최종 갱신 " + raw.updated_at.replace("T"," ").slice(0,16) + " KST · 출처 " + raw.source;
+  document.getElementById("c-period").textContent = L.period;
+  document.getElementById("c-value").textContent = L.value.toFixed(2);
+  const chg=document.getElementById("c-chg");
+  chg.textContent=(L.change>0?"+":"")+L.change.toFixed(2)+"p"; chg.className="val "+cls;
+  const st=document.getElementById("c-state");
+  st.textContent=L.state+" "+L.icon; st.className="val "+cls;
+
+  document.querySelectorAll("button").forEach(b=>b.onclick=()=>{
+    document.querySelectorAll("button").forEach(x=>x.classList.remove("on"));
+    b.classList.add("on"); draw(+b.dataset.n);
+  });
+  draw(60);
+}
+
+function draw(n){
+  const ks=Object.keys(raw.series), all=n>0?ks.slice(-n):ks;
+  const vals=all.map(k=>raw.series[k]);
+  const diffs=all.map((k,i)=> i===0?null:+(raw.series[k]-raw.series[all[i-1]]).toFixed(3));
+
+  if(line) line.destroy();
+  line=new Chart(document.getElementById("line"),{
+    type:"line",
+    data:{labels:all,datasets:[{
+      data:vals,borderWidth:2,pointRadius:0,tension:.15,
+      segment:{borderColor:c=>c.p1.parsed.y>=c.p0.parsed.y?UP:DOWN}
+    }]},
+    options:{plugins:{legend:{display:false},tooltip:{callbacks:{
+        label:c=>"CLI "+c.parsed.y.toFixed(2)}}},
+      scales:{x:{grid:{display:false},ticks:{maxTicksLimit:10}},
+              y:{grid:{color:"#23262e"},
+                 afterBuildTicks:a=>{if(!a.ticks.some(t=>t.value===100))a.ticks.push({value:100});}}},
+      interaction:{mode:"index",intersect:false}},
+    plugins:[{id:"base",afterDraw(ch){
+      const y=ch.scales.y.getPixelForValue(100),x=ch.chartArea;
+      const g=ch.ctx;g.save();g.setLineDash([4,4]);g.strokeStyle="#5c6370";
+      g.beginPath();g.moveTo(x.left,y);g.lineTo(x.right,y);g.stroke();g.restore();}}]
+  });
+
+  if(bar) bar.destroy();
+  bar=new Chart(document.getElementById("bar"),{
+    type:"bar",
+    data:{labels:all,datasets:[{data:diffs,
+      backgroundColor:diffs.map(v=>v>=0?UP:DOWN)}]},
+    options:{plugins:{legend:{display:false},title:{display:true,text:"전월비 변화 (p)",align:"start"}},
+      scales:{x:{grid:{display:false},ticks:{maxTicksLimit:10}},y:{grid:{color:"#23262e"}}}}
+  });
+
+  const rows=ks.slice(-13).reverse();
+  document.getElementById("tbody").innerHTML=rows.slice(0,12).map((k,i)=>{
+    const v=raw.series[k], p=raw.series[rows[i+1]];
+    if(p===undefined) return "";
+    const d=v-p, c=d>0?"up":(d<0?"down":"");
+    return `<tr><td>${k}</td><td>${v.toFixed(2)}</td>
+      <td class="${c}">${d>0?"+":""}${d.toFixed(2)}</td>
+      <td class="${c}">${d>0?"상승":(d<0?"하락":"보합")}</td></tr>`;
+  }).join("");
+}
+</script>
+</body>
+</html>
