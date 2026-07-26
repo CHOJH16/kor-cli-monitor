@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: cli-monitor
@@ -21,15 +22,22 @@ jobs:
   update:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
+          persist-credentials: true
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - run: pip install requests
+      - name: Install deps
+        run: pip install requests
 
-      - name: Fetch and notify
+      - name: Fetch data and notify
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -37,10 +45,69 @@ jobs:
           FORCE_NOTIFY: ${{ inputs.force }}
         run: python scripts/update.py
 
-      - name: Commit data
+      # ── 생존 유지 ①: PAT 명의로 커밋해 60일 타이머를 되돌린다
+      - name: Commit data (as PAT owner)
+        env:
+          HAS_PAT: ${{ secrets.PAT_TOKEN != '' }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/data/kor_cli.json
-          git diff --staged --quiet || git commit -m "data: update KOR CLI"
-          git push
+          set -e
+          if [ "$HAS_PAT" = "true" ]; then
+            git config user.name  "${GITHUB_ACTOR}"
+            git config user.email "${GITHUB_ACTOR}@users.noreply.github.com"
+          else
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          fi
+
+          mkdir -p .keepalive
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > .keepalive/heartbeat.txt
+
+          git add docs/data/kor_cli.json .keepalive/heartbeat.txt
+          if git diff --staged --quiet; then
+            echo "변경 없음"
+          else
+            git commit -m "chore: update KOR CLI data [$(date -u +%F)]"
+            for i in 1 2 3; do
+              git push && break
+              echo "push 재시도 $i"; sleep 5; git pull --rebase --autostash || true
+            done
+          fi
+
+      # ── 생존 유지 ②: 워크플로가 이미 꺼져 있으면 API로 다시 켠다
+      - name: Re-enable workflow via API
+        if: ${{ always() && secrets.PAT_TOKEN != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          gh api -X PUT \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/monitor.yml/enable" \
+            && echo "워크플로 활성 상태 확인/복구 완료" \
+            || echo "이미 활성 상태이거나 권한 부족(무시 가능)"
+
+      # ── 생존 유지 ③: PAT 만료가 임박하면 텔레그램으로 경고
+      - name: Check PAT expiry
+        if: ${{ always() && secrets.PAT_TOKEN != '' }}
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python scripts/check_token.py
+
+  # ── 생존 유지 ④: 위 작업이 통째로 실패하면 그 사실을 알린다
+  alert-on-failure:
+    needs: update
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify failure
+        run: |
+          curl -s -X POST \
+            "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
+            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d parse_mode="HTML" \
+            --data-urlencode text="⚠️ <b>CLI 봇 실행 실패</b>
+
+오늘 자동 실행이 실패했습니다.
+확인: https://github.com/${{ github.repository }}/actions
+
+연속 실패 시 PAT 만료 여부를 점검하세요."
