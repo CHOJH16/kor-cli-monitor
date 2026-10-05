@@ -45,13 +45,13 @@ def main():
         return
 
     if r.status_code == 401:
-        notify("🔴 <b>PAT 만료 또는 무효</b>\n\n"
-               "깃허브 토큰이 더 이상 동작하지 않습니다.\n"
-               "자동 실행이 60일 뒤 중단될 수 있습니다.\n\n"
-               "재발급: github.com/settings/personal-access-tokens\n"
-               "권한: Contents=RW, Actions=RW\n"
-               "재등록: 저장소 Settings → Secrets → PAT_TOKEN")
-        print("[오류] PAT 무효", file=sys.stderr)
+        notify("🟡 <b>깃허브 PAT 만료 안내</b>\n\n"
+               "기존에 등록하셨던 PAT 토큰이 만료되었습니다.\n"
+               "현재 워크플로는 기본 GITHUB_TOKEN으로 작동하여 수집 및 알림은 정상 지속됩니다.\n\n"
+               "PAT 갱신을 원하시면:\n"
+               "1. github.com/settings/personal-access-tokens 에서 Regenerate\n"
+               "2. 저장소 Settings → Secrets → PAT_TOKEN 갱신")
+        print("[정보] PAT 만료 확인됨 (기본 토큰으로 대체 작동)", file=sys.stderr)
         return
 
     exp = r.headers.get("github-authentication-token-expiration")
@@ -73,9 +73,8 @@ def main():
     if left <= WARN_DAYS:
         notify(f"🟡 <b>PAT 만료 임박 (D-{left})</b>\n\n"
                f"만료일: {dt:%Y-%m-%d}\n"
-               "이 날짜가 지나면 자동 실행이 서서히 중단됩니다.\n\n"
                "1. github.com/settings/personal-access-tokens 접속\n"
-               "2. kor-cli-keepalive → Regenerate token\n"
+               "2. 토큰 Regenerate\n"
                "3. 저장소 Settings → Secrets → PAT_TOKEN 갱신")
 
 
