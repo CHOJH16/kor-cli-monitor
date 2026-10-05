@@ -68,7 +68,7 @@ jobs:
             done
           fi
 
-      - name: Keep workflow active (prevent 60-day auto disable)
+      - name: Keep workflow active
         if: always()
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
@@ -77,8 +77,8 @@ jobs:
           && echo "워크플로 활성 유지 완료" \
           || echo "API 호출 완료(무시 가능)"
 
-      - name: Check PAT expiry (optional)
-        if: ${{ always() && secrets.PAT_TOKEN != '' }}
+      - name: Check PAT expiry
+        if: always()
         env:
           PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
