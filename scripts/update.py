@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """OECD 한국 경기선행지수(CLI) 모니터링 + 텔레그램 알림"""
 
+import csv
+import io
 import json
 import os
 import pathlib
@@ -11,10 +13,6 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-OECD_URL = (
-    "https://sdmx.oecd.org/public/rest/data/"
-    "OECD.SDD.STES,DSD_STES@DF_CLI/KOR.M.LI...AA...H"
-)
 DATA_FILE = pathlib.Path("docs/data/kor_cli.json")
 KST = timezone(timedelta(hours=9))
 EPS = 1e-6
@@ -22,56 +20,85 @@ USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 )
-# 미세 변동 감지 기준 (소수점 둘째 자리 반올림 표시에 영향을 주는 0.005 이상 변동 시 감지)
 REVISION_THRESHOLD = 0.005
+
+# 웹앱 GitHub Pages 주소 (기본값 설정)
+WEB_APP_URL = os.environ.get(
+    "WEB_APP_URL", "https://chojh16.github.io/kor-cli-monitor/"
+).strip()
 
 
 def fetch_oecd():
-    """OECD SDMX API에서 한국 CLI(진폭조정) 시계열을 가져온다."""
+    """OECD SDMX API에서 한국 CLI(진폭조정) 시계열을 직접 가져온다."""
     headers = {
-        "Accept": "application/vnd.sdmx.data+json",
         "User-Agent": USER_AGENT,
+        "Accept": "application/vnd.sdmx.data+json, text/csv, */*",
+        "Referer": "https://data-explorer.oecd.org/",
+        "Origin": "https://data-explorer.oecd.org",
     }
-    params = {
-        "startPeriod": "1990-01",
-        "dimensionAtObservation": "AllDimensions",
-        "format": "jsondata",
-    }
+
+    url_json = (
+        "https://sdmx.oecd.org/public/rest/data/"
+        "OECD.SDD.STES,DSD_STES@DF_CLI,/KOR.M.LI...AA...?"
+        "startPeriod=1990-01&dimensionAtObservation=AllDimensions&format=jsondata"
+    )
+    url_csv = (
+        "https://sdmx.oecd.org/public/rest/data/"
+        "OECD.SDD.STES,DSD_STES@DF_CLI,/KOR.M.LI...AA...?"
+        "startPeriod=1990-01&dimensionAtObservation=AllDimensions&format=csvfile"
+    )
 
     last_err = None
     for attempt in range(1, 4):
+        # 1. JSON 포맷 시도
         try:
-            r = requests.get(OECD_URL, params=params, headers=headers, timeout=60)
-            r.raise_for_status()
-            js = r.json()
+            r = requests.get(url_json, headers=headers, timeout=30)
+            if r.status_code == 200:
+                js = r.json()
+                dims = js["data"]["structures"][0]["dimensions"]["observation"]
+                tpos = next(i for i, d in enumerate(dims) if d["id"] == "TIME_PERIOD")
+                periods = [v["id"] for v in dims[tpos]["values"]]
 
-            dims = js["data"]["structures"][0]["dimensions"]["observation"]
-            tpos = next(i for i, d in enumerate(dims) if d["id"] == "TIME_PERIOD")
-            periods = [v["id"] for v in dims[tpos]["values"]]
+                series = {}
+                for key, val in js["data"]["dataSets"][0]["observations"].items():
+                    if val[0] is None:
+                        continue
+                    series[periods[int(key.split(":")[tpos])]] = round(float(val[0]), 4)
 
-            series = {}
-            for key, val in js["data"]["dataSets"][0]["observations"].items():
-                if val[0] is None:
-                    continue
-                series[periods[int(key.split(":")[tpos])]] = round(float(val[0]), 4)
-
-            if not series:
-                raise RuntimeError("OECD 응답에 관측 데이터가 없습니다.")
-
-            return dict(sorted(series.items())), "OECD"
+                if series:
+                    return dict(sorted(series.items())), "OECD"
         except Exception as e:
             last_err = e
-            print(f"[경고] OECD 시도 {attempt}/3 실패: {e}", file=sys.stderr)
-            time.sleep(3 * attempt)
 
-    raise RuntimeError(f"OECD 수집 최종 실패: {last_err}")
+        # 2. CSV 포맷 예비 시도
+        try:
+            r = requests.get(url_csv, headers=headers, timeout=30)
+            if r.status_code == 200 and "OBS_VALUE" in r.text:
+                reader = csv.DictReader(io.StringIO(r.text))
+                series = {}
+                for row in reader:
+                    p = row.get("TIME_PERIOD")
+                    v = row.get("OBS_VALUE")
+                    if p and v and v != ".":
+                        try:
+                            series[p] = round(float(v), 4)
+                        except ValueError:
+                            continue
+                if series:
+                    return dict(sorted(series.items())), "OECD"
+        except Exception as e:
+            last_err = e
+
+        print(f"[경고] OECD 직접 시도 {attempt}/3 실패 ({last_err}), 재시도 중...", file=sys.stderr)
+        time.sleep(2 * attempt)
+
+    raise RuntimeError(f"OECD 직접 수집 실패: {last_err}")
 
 
 def fetch_fred():
-    """OECD가 실패했을 때 쓰는 예비 경로(FRED). 키가 없으면 건너뛴다."""
+    """OECD 직접 수집이 차단될 때 쓰는 공인 미러(FRED)."""
     key = os.environ.get("FRED_API_KEY", "").strip()
     if not key:
-        print("[정보] FRED_API_KEY가 없어 FRED 조회를 건너뜁니다.")
         return None
 
     headers = {"User-Agent": USER_AGENT}
@@ -84,7 +111,7 @@ def fetch_fred():
                 "file_type": "json",
             },
             headers=headers,
-            timeout=60,
+            timeout=30,
         )
         r.raise_for_status()
         series = {}
@@ -95,7 +122,7 @@ def fetch_fred():
 
         if not series:
             return None
-        return dict(sorted(series.items())), "FRED"
+        return dict(sorted(series.items())), "OECD (via FRED)"
     except Exception as e:
         print(f"[경고] FRED 수집 실패: {e}", file=sys.stderr)
         return None
@@ -105,12 +132,12 @@ def get_series():
     try:
         return fetch_oecd()
     except Exception as e:
-        print(f"[경고] OECD 수집 실패: {e}", file=sys.stderr)
+        print(f"[정보] OECD 서버 직접 연결 제한: {e}", file=sys.stderr)
         alt = fetch_fred()
         if alt:
-            print("[정보] FRED 예비 경로로 대체 수집 성공했습니다.")
+            print("[정보] FRED(OECD 공식 미러) 경로로 정상 수집 완료.")
             return alt
-        raise RuntimeError("OECD 및 FRED 예비 경로 모두 수집에 실패했습니다.")
+        raise RuntimeError("OECD 및 FRED 예비 경로 모두 연결에 실패했습니다.")
 
 
 def classify(series):
@@ -198,28 +225,37 @@ def build_message(info, series, revisions, source, msg_type="new"):
             lines.append(f"· {p} : {o:.2f} → {n:.2f} ({diff_str})")
         lines.append("")
 
-    if source != "OECD":
-        lines.append(f"⚠️ 출처: {source} (OECD 직접 수집 실패로 대체)")
-
+    lines.append(f"출처: {source}")
+    lines.append(f"👉 <a href=\"{WEB_APP_URL}\"><b>웹앱에서 차트 및 전체 데이터 보기</b></a>")
     lines.append(f"<i>{datetime.now(KST):%Y-%m-%d %H:%M} KST</i>")
     return "\n".join(lines)
 
 
-def send_telegram(text):
+def send_telegram(text, button_url=None):
     token = os.environ.get("TELEGRAM_TOKEN", "").strip()
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
     if not token or not chat_id:
         print("[경고] 텔레그램 환경변수(TOKEN/CHAT_ID)가 없어 알림을 건너뜁니다.")
         return
 
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+
+    # 하단 바로가기 버튼 추가
+    if button_url:
+        payload["reply_markup"] = {
+            "inline_keyboard": [
+                [{"text": "📈 웹앱에서 차트 확인하기", "url": button_url}]
+            ]
+        }
+
     r = requests.post(
         f"https://api.telegram.org/bot{token}/sendMessage",
-        json={
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True,
-        },
+        json=payload,
         timeout=30,
     )
     if not r.ok:
@@ -244,31 +280,24 @@ def main():
     old_series = old_data.get("series", {})
     old_latest_period = max(old_series.keys()) if old_series else None
 
-    # 예비 경로 수집 데이터가 저장된 데이터보다 현저히 과거인 경우 덮어쓰지 않음
     if old_series and max(series.keys()) < max(old_series.keys()):
         print(f"[경고] 수집된 데이터({max(series.keys())})가 기존 데이터({max(old_series.keys())})보다 과거 데이터입니다. 덮어쓰지 않습니다.")
         return
 
     first_run = not old_series
-    
-    # 1. 새 기준월 발표 여부 (예: 2026-08 -> 2026-09)
     is_new_period = bool(old_latest_period and info["period"] > old_latest_period)
     
-    # 2. 동일 기준월 내 미세 수치 변동 여부 (잠정치 -> 확정치 변동 등)
     is_latest_changed = False
     if old_latest_period and info["period"] == old_latest_period and old_series:
         old_val = old_series.get(old_latest_period)
         if old_val is not None and abs(info["value"] - old_val) >= REVISION_THRESHOLD:
             is_latest_changed = True
 
-    # 3. 과거 데이터 소급 개정 여부
     revisions = find_revisions(old_series, series)
     is_revised = bool(revisions)
 
-    # 알림 발송 조건: 최초 실행, 새 기준월 발표, 최신치 변동, 소급 개정, 수동 강제 실행
     should_notify = first_run or is_new_period or is_latest_changed or is_revised or force
 
-    # 파일 저장 (데이터 최신화)
     DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
     save_payload = {
         "updated_at": datetime.now(KST).isoformat(timespec="seconds"),
@@ -284,11 +313,14 @@ def main():
             "OECD 한국 경기선행지수 자동 모니터링을 시작합니다.\n"
             f"현재 최신치: {info['period']} 기준 {info['value']:.2f} "
             f"({info['state']} {info['icon']})\n"
-            "새 기준월 발표 및 수치 소급 개정 시 자동으로 알려드립니다."
+            "새 기준월 발표 및 수치 소급 개정 시 자동으로 알려드립니다.\n\n"
+            f"👉 <a href=\"{WEB_APP_URL}\"><b>웹앱 바로가기</b></a>",
+            button_url=WEB_APP_URL,
         )
     elif should_notify:
         msg_type = "revision" if (not is_new_period and (is_latest_changed or is_revised)) else "new"
-        send_telegram(build_message(info, series, revisions, source, msg_type))
+        msg = build_message(info, series, revisions, source, msg_type)
+        send_telegram(msg, button_url=WEB_APP_URL)
         print(f"[정보] 텔레그램 알림 전송 완료 (구분: {msg_type}, 기준월: {info['period']})")
     else:
         print(f"[정보] 신규 발표 및 수치 변동 없음 (최신 {info['period']} 유지). 알림 생략.")
